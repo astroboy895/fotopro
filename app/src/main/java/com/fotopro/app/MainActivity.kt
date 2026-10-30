@@ -8,10 +8,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Bundle
 import android.provider.MediaStore
-import android.view.View
 import android.widget.Button
 import android.widget.TextView
-import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -19,6 +17,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
@@ -28,7 +27,6 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
-import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -44,6 +42,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var photoButton: Button
     private lateinit var videoButton: Button
     private lateinit var cameraExecutor: ExecutorService
+
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
@@ -58,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
         previewView = findViewById(R.id.previewView)
         statusText = findViewById(R.id.statusText)
         resultText = findViewById(R.id.resultText)
@@ -69,10 +69,14 @@ class MainActivity : AppCompatActivity() {
         videoButton.setOnClickListener { toggleVideo() }
 
         val needed = mutableListOf(Manifest.permission.CAMERA)
-        if (android.os.Build.VERSION.SDK_INT <= 32) needed.add(Manifest.permission.RECORD_AUDIO)
-        if (needed.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }) {
-            startCamera()
-        } else permissionLauncher.launch(needed.toTypedArray())
+        if (android.os.Build.VERSION.SDK_INT <= 32) {
+            needed.add(Manifest.permission.RECORD_AUDIO)
+        }
+
+        if (needed.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }) startCamera()
+        else permissionLauncher.launch(needed.toTypedArray())
     }
 
     private fun startCamera() {
@@ -82,18 +86,28 @@ class MainActivity : AppCompatActivity() {
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
+
             imageCapture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .build()
+
             val recorder = Recorder.Builder()
-                .setQualitySelector(QualitySelector.fromOrderedList(
-                    listOf(Quality.FHD, Quality.HD, Quality.SD), Quality.HD
-                )).build()
+                .setQualitySelector(
+                    QualitySelector.from(
+                        Quality.FHD,
+                        FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+                    )
+                )
+                .build()
+
             videoCapture = VideoCapture.withOutput(recorder)
+
             try {
                 provider.unbindAll()
-                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview, imageCapture, videoCapture)
+                provider.bindToLifecycle(
+                    this, CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview, imageCapture, videoCapture
+                )
                 statusText.text = "FOTOPRO activo · calidad automática"
             } catch (e: Exception) {
                 statusText.text = "No se pudo iniciar la cámara: ${e.localizedMessage}"
@@ -112,6 +126,7 @@ class MainActivity : AppCompatActivity() {
         val options = ImageCapture.OutputFileOptions.Builder(
             contentResolver, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
         ).build()
+
         statusText.text = "Tomando fotografía…"
         capture.takePicture(options, ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
@@ -136,8 +151,8 @@ class MainActivity : AppCompatActivity() {
                             val outUri = contentResolver.insert(
                                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI, outValues
                             ) ?: throw Exception("No se pudo crear el archivo")
-                            contentResolver.openOutputStream(outUri)?.use { stream ->
-                                enhanced.compress(Bitmap.CompressFormat.JPEG, 95, stream)
+                            contentResolver.openOutputStream(outUri)?.use {
+                                enhanced.compress(Bitmap.CompressFormat.JPEG, 95, it)
                             }
                             bitmap.recycle()
                             enhanced.recycle()
@@ -153,13 +168,14 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
+
                 override fun onError(exception: ImageCaptureException) {
                     statusText.text = "Error al tomar la foto: ${exception.localizedMessage}"
                 }
             })
     }
 
-    // Optimización inicial conservadora: contraste y color. No inventa detalle perdido.
+    // Optimización inicial conservadora de contraste y color.
     private fun enhance(src: Bitmap): Bitmap {
         val w = src.width
         val h = src.height
@@ -190,6 +206,7 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "Finalizando video…"
             return
         }
+
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "FOTOPRO_${stamp()}.mp4")
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
@@ -198,9 +215,12 @@ class MainActivity : AppCompatActivity() {
         val output = MediaStoreOutputOptions.Builder(
             contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         ).setContentValues(values).build()
+
         var pending = capture.output.prepareRecording(this, output)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED) pending = pending.withAudioEnabled()
+            PackageManager.PERMISSION_GRANTED
+        ) pending = pending.withAudioEnabled()
+
         recording = pending.start(ContextCompat.getMainExecutor(this)) { event ->
             when (event) {
                 is VideoRecordEvent.Start -> {
@@ -210,14 +230,18 @@ class MainActivity : AppCompatActivity() {
                 is VideoRecordEvent.Finalize -> {
                     recording = null
                     videoButton.text = "GRABAR VIDEO"
-                    statusText.text = if (event.hasError()) "Error al guardar el video."
-                        else "Video guardado. La optimización avanzada se incorporará en una próxima versión."
+                    statusText.text = if (event.hasError()) {
+                        "Error al guardar el video."
+                    } else {
+                        "Video guardado. La optimización avanzada se incorporará en una próxima versión."
+                    }
                 }
             }
         }
     }
 
-    private fun stamp() = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    private fun stamp(): String =
+        SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
     override fun onDestroy() {
         super.onDestroy()
