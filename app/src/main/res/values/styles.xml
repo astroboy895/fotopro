@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.FOTOPRO" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#42D6C5</item>
+        <item name="colorPrimaryVariant">#167D78</item>
+        <item name="colorSecondary">#42D6C5</item>
+        <item name="android:statusBarColor">#080D12</item>
+        <item name="android:navigationBarColor">#080D12</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
