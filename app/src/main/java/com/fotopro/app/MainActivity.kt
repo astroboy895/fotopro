@@ -8,7 +8,9 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.os.Bundle
 import android.provider.MediaStore
+import android.view.WindowManager
 import android.widget.Button
+import android.widget.ImageButton
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -17,7 +19,6 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
@@ -27,6 +28,7 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -41,8 +43,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var resultText: TextView
     private lateinit var photoButton: Button
     private lateinit var videoButton: Button
+    private lateinit var switchCameraButton: ImageButton
     private lateinit var cameraExecutor: ExecutorService
 
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
@@ -56,6 +61,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Mantiene toda la interfaz dentro del área segura, por encima de la navegación Android.
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        window.statusBarColor = Color.rgb(8, 13, 18)
+        window.navigationBarColor = Color.rgb(8, 13, 18)
+        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightNavigationBars = false
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+
         setContentView(R.layout.activity_main)
 
         previewView = findViewById(R.id.previewView)
@@ -63,29 +76,30 @@ class MainActivity : AppCompatActivity() {
         resultText = findViewById(R.id.resultText)
         photoButton = findViewById(R.id.photoButton)
         videoButton = findViewById(R.id.videoButton)
-        cameraExecutor = Executors.newSingleThreadExecutor()
+        switchCameraButton = findViewById(R.id.switchCameraButton)
 
+        cameraExecutor = Executors.newSingleThreadExecutor()
         photoButton.setOnClickListener { takePhoto() }
         videoButton.setOnClickListener { toggleVideo() }
+        switchCameraButton.setOnClickListener { switchCamera() }
 
         val needed = mutableListOf(Manifest.permission.CAMERA)
-        if (android.os.Build.VERSION.SDK_INT <= 32) {
-            needed.add(Manifest.permission.RECORD_AUDIO)
-        }
+        if (android.os.Build.VERSION.SDK_INT <= 32) needed.add(Manifest.permission.RECORD_AUDIO)
 
         if (needed.all {
-            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-        }) startCamera()
-        else permissionLauncher.launch(needed.toTypedArray())
+                ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+            }) {
+            startCamera()
+        } else {
+            permissionLauncher.launch(needed.toTypedArray())
+        }
     }
 
     private fun startCamera() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             val provider = future.get()
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
+            cameraProvider = provider
 
             imageCapture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
@@ -93,26 +107,66 @@ class MainActivity : AppCompatActivity() {
 
             val recorder = Recorder.Builder()
                 .setQualitySelector(
-                    QualitySelector.from(
-                        Quality.FHD,
-                        FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+                    QualitySelector.fromOrderedList(
+                        listOf(Quality.FHD, Quality.HD, Quality.SD), Quality.HD
                     )
-                )
-                .build()
-
+                ).build()
             videoCapture = VideoCapture.withOutput(recorder)
 
-            try {
-                provider.unbindAll()
-                provider.bindToLifecycle(
-                    this, CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview, imageCapture, videoCapture
-                )
-                statusText.text = "FOTOPRO activo · calidad automática"
-            } catch (e: Exception) {
-                statusText.text = "No se pudo iniciar la cámara: ${e.localizedMessage}"
+            if (!provider.hasCamera(cameraSelector)) {
+                cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             }
+            bindSelectedCamera()
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun bindSelectedCamera() {
+        val provider = cameraProvider ?: return
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+
+        try {
+            provider.unbindAll()
+            provider.bindToLifecycle(
+                this,
+                cameraSelector,
+                preview,
+                imageCapture,
+                videoCapture
+            )
+            statusText.text = if (cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) {
+                "FOTOPRO activo · cámara selfie"
+            } else {
+                "FOTOPRO activo · cámara principal"
+            }
+        } catch (e: Exception) {
+            statusText.text = "No se pudo iniciar la cámara: ${e.localizedMessage}"
+        }
+    }
+
+    private fun switchCamera() {
+        if (recording != null) {
+            statusText.text = "Detén el video antes de cambiar de cámara."
+            return
+        }
+        val provider = cameraProvider ?: return
+        val target = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
+
+        try {
+            if (!provider.hasCamera(target)) {
+                statusText.text = "Esta cámara no está disponible en el dispositivo."
+                return
+            }
+            cameraSelector = target
+            bindSelectedCamera()
+        } catch (e: Exception) {
+            statusText.text = "No se pudo cambiar la cámara."
+        }
     }
 
     private fun takePhoto() {
@@ -151,8 +205,8 @@ class MainActivity : AppCompatActivity() {
                             val outUri = contentResolver.insert(
                                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI, outValues
                             ) ?: throw Exception("No se pudo crear el archivo")
-                            contentResolver.openOutputStream(outUri)?.use {
-                                enhanced.compress(Bitmap.CompressFormat.JPEG, 95, it)
+                            contentResolver.openOutputStream(outUri)?.use { stream ->
+                                enhanced.compress(Bitmap.CompressFormat.JPEG, 95, stream)
                             }
                             bitmap.recycle()
                             enhanced.recycle()
@@ -175,7 +229,7 @@ class MainActivity : AppCompatActivity() {
             })
     }
 
-    // Optimización inicial conservadora de contraste y color.
+    // Optimización inicial conservadora: contraste y color.
     private fun enhance(src: Bitmap): Bitmap {
         val w = src.width
         val h = src.height
@@ -230,17 +284,14 @@ class MainActivity : AppCompatActivity() {
                 is VideoRecordEvent.Finalize -> {
                     recording = null
                     videoButton.text = "GRABAR VIDEO"
-                    statusText.text = if (event.hasError()) {
-                        "Error al guardar el video."
-                    } else {
-                        "Video guardado. La optimización avanzada se incorporará en una próxima versión."
-                    }
+                    statusText.text = if (event.hasError()) "Error al guardar el video."
+                    else "Video guardado. La optimización avanzada se incorporará en una próxima versión."
                 }
             }
         }
     }
 
-    private fun stamp(): String =
+    private fun stamp() =
         SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
     override fun onDestroy() {
